@@ -67,18 +67,35 @@ struct OpenCL {
     cl::CommandQueue queue;
 };
 
-void profile_reduce(int n) {
+void profile_reduce(int n,  OpenCL& opencl) {
+    int loc_sz = 128;
     auto a = random_vector<float>(n);
-    float result = 0, expected_result = 0;
+    Vector<float> result(n / loc_sz);
+    float expected_result = 0;
+    opencl.queue.flush();
+    cl::Kernel kernel(opencl.program, "reduce");
     auto t0 = clock_type::now();
     expected_result = reduce(a);
     auto t1 = clock_type::now();
+    cl::Buffer d_a(opencl.queue, begin(a), end(a), true);
+    cl::Buffer d_result(opencl.context, CL_MEM_READ_WRITE, sizeof(float) * result.size());
+    kernel.setArg(0, d_a);
+    kernel.setArg(1, d_result);
+    opencl.queue.flush();
     auto t2 = clock_type::now();
+    opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n), cl::NDRange(loc_sz));
+    opencl.queue.flush();
     auto t3 = clock_type::now();
-    auto t4 = clock_type::now();
-    // TODO Implement OpenCL version! See profile_vector_times_vector for an example.
-    // TODO Uncomment the following line!
-    //verify_vector(expected_result, result);
+    cl::copy(opencl.queue, d_result, std::begin(result), std::end(result));
+    float sum = 0;
+    for (int i = 0; i < result.size(); i++)
+        sum += result[i];
+    auto t4 = clock_type::now(); // include post processing time
+    if (std::abs(expected_result - sum) > 1e3) {
+        std::stringstream msg;
+        msg << "Invalid value: " << sum << ", expected: " << expected_result;
+        throw std::runtime_error(msg.str());
+    }
     print("reduce",
           {t1-t0,t4-t1,t2-t1,t3-t2,t4-t3},
           {bandwidth(n*n+n+n, t0, t1), bandwidth(n*n+n+n, t2, t3)});
@@ -104,15 +121,33 @@ void profile_scan_inclusive(int n) {
 void opencl_main(OpenCL& opencl) {
     using namespace std::chrono;
     print_column_names();
-    profile_reduce(1024*1024*10);
+    profile_reduce(1024*1024*10, opencl);
     profile_scan_inclusive(1024*1024*10);
 }
 
 const std::string src = R"(
+#define BUFFSIZE (1024)
 kernel void reduce(global float* a,
-                   global float* b,
                    global float* result) {
-    // TODO: Implement OpenCL version.
+    const int m = get_local_size(0);
+    int t = get_local_id(0);
+    int k = get_group_id(0);
+
+    // move parts of array into local
+    local float buff[BUFFSIZE];
+    buff[t] = a[k * m + t];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // compute in local
+    for (int offset = m / 2; offset > 0; offset /= 2) {
+        if (t < offset) {
+            buff[t] += buff[t + offset];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (t == 0) {
+        result[k] = buff[0];
+    }
 }
 
 kernel void scan_inclusive(global float* a,
