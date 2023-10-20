@@ -87,10 +87,8 @@ void profile_reduce(int n,  OpenCL& opencl) {
     opencl.queue.flush();
     auto t3 = clock_type::now();
     cl::copy(opencl.queue, d_result, std::begin(result), std::end(result));
-    float sum = 0;
-    for (int i = 0; i < result.size(); i++)
-        sum += result[i];
-    auto t4 = clock_type::now(); // include post processing time
+    auto t4 = clock_type::now();
+    float sum = result[0];
     if (std::abs(expected_result - sum) > 1e3) {
         std::stringstream msg;
         msg << "Invalid value: " << sum << ", expected: " << expected_result;
@@ -126,12 +124,14 @@ void opencl_main(OpenCL& opencl) {
 }
 
 const std::string src = R"(
-#define BUFFSIZE (1024)
+#define BUFFSIZE 1024
 kernel void reduce(global float* a,
                    global float* result) {
     const int m = get_local_size(0);
     int t = get_local_id(0);
     int k = get_group_id(0);
+    const int l = get_num_groups(0);
+    const int i = get_global_id(0);
 
     // move parts of array into local
     local float buff[BUFFSIZE];
@@ -147,6 +147,15 @@ kernel void reduce(global float* a,
     }
     if (t == 0) {
         result[k] = buff[0];
+    }
+    barrier(CLK_GLOBAL_MEM_FENCE);
+
+    // only use single work item
+    if (i == 0) {
+        float sum = 0;
+        for (int j = 0; j < l; j++)
+            sum += result[j];
+        result[0] = sum;
     }
 }
 
