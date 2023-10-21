@@ -70,7 +70,7 @@ struct OpenCL {
 void profile_reduce(int n,  OpenCL& opencl) {
     int loc_sz = 128;
     auto a = random_vector<float>(n);
-    Vector<float> result(n / loc_sz);
+    Vector<float> result(loc_sz);
     float expected_result = 0;
     opencl.queue.flush();
     cl::Kernel kernel(opencl.program, "reduce");
@@ -78,16 +78,31 @@ void profile_reduce(int n,  OpenCL& opencl) {
     expected_result = reduce(a);
     auto t1 = clock_type::now();
     cl::Buffer d_a(opencl.queue, begin(a), end(a), true);
-    cl::Buffer d_result(opencl.context, CL_MEM_READ_WRITE, sizeof(float) * result.size());
-    kernel.setArg(0, d_a);
-    kernel.setArg(1, d_result);
     opencl.queue.flush();
     auto t2 = clock_type::now();
-    opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n), cl::NDRange(loc_sz));
-    opencl.queue.flush();
-    auto t3 = clock_type::now();
-    cl::copy(opencl.queue, d_result, std::begin(result), std::end(result));
-    auto t4 = clock_type::now();
+    auto t3 = t2;
+    auto t4 = t2;
+    int size = n / loc_sz;
+    while (1) {
+        kernel.setArg(0, d_a);
+        cl::Buffer d_result(opencl.context, CL_MEM_READ_WRITE, sizeof(float) * size);
+        kernel.setArg(1, d_result);
+        opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(size * loc_sz), cl::NDRange(loc_sz));
+        d_a = d_result;
+
+        if (size % loc_sz != 0 && size > loc_sz) {
+            // increase size to have room for remainder
+            size *= 2;
+        }
+        if (size <= loc_sz) {
+            opencl.queue.flush();
+            t3 = clock_type::now();
+            cl::copy(opencl.queue, d_result, std::begin(result), std::end(result));
+            t4 = clock_type::now();
+            break;
+        }
+        size /= loc_sz;
+    }
     float sum = result[0];
     if (std::abs(expected_result - sum) > 1e3) {
         std::stringstream msg;
@@ -148,10 +163,10 @@ kernel void reduce(global float* a,
     if (t == 0) {
         result[k] = buff[0];
     }
-    barrier(CLK_GLOBAL_MEM_FENCE);
+    const int n = get_global_size(0);
 
     // only use single work item
-    if (i == 0) {
+    if (i == 0 && n / m <= m) {
         float sum = 0;
         for (int j = 0; j < l; j++)
             sum += result[j];
