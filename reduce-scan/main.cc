@@ -67,7 +67,7 @@ struct OpenCL {
     cl::CommandQueue queue;
 };
 
-void profile_reduce(int n,  OpenCL& opencl) {
+void profile_reduce(int n, OpenCL& opencl) {
     int loc_sz = 128;
     auto a = random_vector<float>(n);
     Vector<float> result(loc_sz);
@@ -114,18 +114,51 @@ void profile_reduce(int n,  OpenCL& opencl) {
           {bandwidth(n*n+n+n, t0, t1), bandwidth(n*n+n+n, t2, t3)});
 }
 
-void profile_scan_inclusive(int n) {
+void profile_scan_inclusive(int n, OpenCL& opencl) {
+    int loc_sz = 256;
     auto a = random_vector<float>(n);
     Vector<float> result(a), expected_result(a);
+    opencl.queue.flush();
+    cl::Kernel kernel(opencl.program, "scan_inclusive");
+    cl::Kernel kernel_fin(opencl.program, "finish_scan_inclusive");
+
     auto t0 = clock_type::now();
     scan_inclusive(expected_result);
+
     auto t1 = clock_type::now();
+    cl::Buffer d_a(opencl.queue, begin(a), end(a), false);
+    opencl.queue.finish();
+
     auto t2 = clock_type::now();
+    kernel.setArg(0, d_a);
+    kernel.setArg(1, 1);
+    opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n), cl::NDRange(loc_sz));
+
+    kernel.setArg(0, d_a);
+    kernel.setArg(1, loc_sz);
+    opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n/loc_sz), cl::NDRange(loc_sz));
+
+    kernel.setArg(0, d_a);
+    kernel.setArg(1, loc_sz*loc_sz);
+    opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n/(loc_sz*loc_sz)), cl::NDRange(160));
+
+    kernel_fin.setArg(0, d_a);
+    kernel_fin.setArg(1, loc_sz);
+    opencl.queue.enqueueNDRangeKernel(kernel_fin, cl::NullRange, cl::NDRange(n/loc_sz - 1), cl::NullRange);
+
+    opencl.queue.finish();
     auto t3 = clock_type::now();
+    cl::copy(opencl.queue, d_a, begin(result), end(result));
     auto t4 = clock_type::now();
-    // TODO Implement OpenCL version! See profile_vector_times_vector for an example.
-    // TODO Uncomment the following line!
-    //verify_vector(expected_result, result);
+
+    float res = result[n - 1];
+    float expected_res = expected_result[n - 1];
+    if (std::abs(expected_res - res) > 1e3) {
+        std::stringstream msg;
+        msg << "Invalid value: " << res << ", expected: " << expected_res;
+        throw std::runtime_error(msg.str());
+    }
+
     print("scan-inclusive",
           {t1-t0,t4-t1,t2-t1,t3-t2,t4-t3},
           {bandwidth(n*n+n*n+n*n, t0, t1), bandwidth(n*n+n*n+n*n, t2, t3)});
@@ -135,7 +168,7 @@ void opencl_main(OpenCL& opencl) {
     using namespace std::chrono;
     print_column_names();
     profile_reduce(1024*1024*10, opencl);
-    profile_scan_inclusive(1024*1024*10);
+    profile_scan_inclusive(1024*1024*10, opencl);
 }
 
 const std::string src = R"(
@@ -174,11 +207,35 @@ kernel void reduce(global float* a,
     }
 }
 
-kernel void scan_inclusive(global float* a,
-                           global float* b,
-                           global float* result) {
-    // TODO: Implement OpenCL version.
+kernel void scan_inclusive(global float* a, int step) {
+    const int i = get_global_id(0);
+    const int t = get_local_id(0);
+    const int m = get_local_size(0);
+
+    // move parts of array into local
+    local float buff[BUFFSIZE];
+    buff[t] = a[(step - 1) + i * step];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    float sum = buff[t];
+    // compute in local
+    for (int offset = 1; offset < m; offset *= 2) {
+        if (t >= offset) {
+            sum += buff[t - offset];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        buff[t] = sum;
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    a[(step - 1) + i * step] = buff[t];
 }
+
+kernel void finish_scan_inclusive(global float*a, int step) {
+        const int i = get_global_id(0);
+        for (int p = 0; p < step - 1; p++) {
+            a[(i + 1) * step + p] += a[(i + 1) * step - 1];
+        }
+    }
 )";
 
 int main() {
