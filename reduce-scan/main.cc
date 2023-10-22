@@ -115,7 +115,7 @@ void profile_reduce(int n, OpenCL& opencl) {
 }
 
 void profile_scan_inclusive(int n, OpenCL& opencl) {
-    int loc_sz = 256;
+    int loc_sz = 128; // optimal size on intel hd graphics?
     auto a = random_vector<float>(n);
     Vector<float> result(a), expected_result(a);
     opencl.queue.flush();
@@ -130,18 +130,18 @@ void profile_scan_inclusive(int n, OpenCL& opencl) {
     opencl.queue.finish();
 
     auto t2 = clock_type::now();
-    kernel.setArg(0, d_a);
-    kernel.setArg(1, 1);
-    opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n), cl::NDRange(loc_sz));
-
-    kernel.setArg(0, d_a);
-    kernel.setArg(1, loc_sz);
-    opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n/loc_sz), cl::NDRange(loc_sz));
-
-    kernel.setArg(0, d_a);
-    kernel.setArg(1, loc_sz*loc_sz);
-    opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n/(loc_sz*loc_sz)), cl::NDRange(160));
-
+    int size = n;
+    int val = 1;
+    while (size > 1) {
+        kernel.setArg(0, d_a);
+        kernel.setArg(1, val);
+        if (size < loc_sz) {
+            loc_sz = size; // fix local size
+        }
+        opencl.queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(size), cl::NDRange(loc_sz));
+        size /= loc_sz;
+        val *= loc_sz;
+    }
     kernel_fin.setArg(0, d_a);
     kernel_fin.setArg(1, loc_sz);
     opencl.queue.enqueueNDRangeKernel(kernel_fin, cl::NullRange, cl::NDRange(n/loc_sz - 1), cl::NullRange);
@@ -230,12 +230,12 @@ kernel void scan_inclusive(global float* a, int step) {
     a[(step - 1) + i * step] = buff[t];
 }
 
-kernel void finish_scan_inclusive(global float*a, int step) {
-        const int i = get_global_id(0);
-        for (int p = 0; p < step - 1; p++) {
-            a[(i + 1) * step + p] += a[(i + 1) * step - 1];
-        }
+kernel void finish_scan_inclusive(global float* a, int step) {
+    const int i = get_global_id(0);
+    for (int j = 0; j < step - 1; j++) {
+        a[(i + 1) * step + j] += a[(i + 1) * step - 1];
     }
+}
 )";
 
 int main() {
