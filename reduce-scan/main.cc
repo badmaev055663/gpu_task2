@@ -97,7 +97,7 @@ void profile_reduce(int n, OpenCL& opencl) {
         if (size <= loc_sz) {
             opencl.queue.flush();
             t3 = clock_type::now();
-            cl::copy(opencl.queue, d_result, std::begin(result), std::end(result));
+            cl::copy(opencl.queue, d_result, std::begin(result), std::begin(result) + size);
             t4 = clock_type::now();
             break;
         }
